@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  API Key Registration
+  Allows users to register for an API key for an API
+
+Parameters:    
+  ApiId:
+    Type: String
+    Description: The identifier of the API to create an API key for. This is found in the API Gateway console in the ID column of the API list page.
+  ApiStageName:
+    Type: String
+    Description: Name of the stage to create the access key for. Examples - dev, prod
+  ApiName:
+    Type: String
+    Default: ''
+    Description: Friendly name of the API used for display purposes.
+  DynamoTableName:
+    Type: String
+    Description: Name of the DynamoDB table where API key details will be stored.
+  DynamoTableCMKPolicyArn:
+    Type: String
+    Default: ''
+    Description: If the provided DynamoDB table is encrypted with a KMS key, provide the arn of a managed policy that has access to decrypt it.  
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Custom domain name that already exists in API Gateway.
+  BasePath:
+    Type: String
+    Default: ''
+    Description: Base path used to access the API created in this stack. Will be appended to the domain name provided in the DomainName parameter.  
+
+Conditions:
+  HasDynamoCMK:
+    !Not 
+      - !Equals [!Ref DynamoTableCMKPolicyArn, '']
+  HasApiName:
+    !Not 
+      - !Equals [!Ref ApiName, '']
+  DeployCustomBasePath:
+    !And 
+      - !Not
+          - !Equals [!Ref DomainName, '']
+      - !Not
+          - !Equals [!Ref BasePath, '']
+
+Globals:  
+  Api:
+    Cors:
+      AllowMethods: "'DELETE,GET,OPTIONS,POST,PUT'"
+      AllowHeaders: "'Content-Type'"
+      AllowOrigin: "'*'"
+
+Resources:
+  ApiKeyRegistrationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref ApiStageName
+      TracingEnabled: true
+      Description: !If [HasApiName, !Sub "API Key Registration (${ApiName})", !Ref AWS::NoValue]
+      DefinitionBody:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: ./api-key-registration-openapi.yaml
+
+  GetApiKeyListRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+      Policies:
+        - PolicyName: GetApiKeysPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}
+
+  GetApiKeyDetailsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+      Policies:
+        - PolicyName: GetApiKeyDetailsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}
+
+  AddApiKeyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole      
+      Policies:
+        - PolicyName: AddApiKeyPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartSyncExecution
+                Resource: !Ref AddApiKeyStateMachine
+
+  AddApiKeyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  AddApiKeyStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: EXPRESS
+      DefinitionUri: state-machines/add-api-key/add-api-key.asl.json
+      DefinitionSubstitutions:
+        DynamoDbGetItem: !Sub arn:${AWS::Partition}:states:::dynamodb:getItem
+        TableName: !Ref DynamoTableName
+        ApiId: !Ref ApiId
+        Stage: !Ref ApiStageName
+        ApiGatewayCreateUsagePlan: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:createUsagePlan
+        ApiGatewayCreateApiKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:createApiKey
+        ApiGatewayUpdateUsagePlan: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:updateUsagePlan
+        ApiGatewayDeleteUsagePlan: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteUsagePlan
+        ApiGatewayDeleteApiKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteApiKey
+        ApiGatewayCreateUsagePlanKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:createUsagePlanKey
+        DynamoDbPutItem: !Sub arn:${AWS::Partition}:states:::dynamodb:putItem
+        ApiGatewayDeleteUsagePlanKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteUsagePlanKey
+      Policies: 
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}
+            - Effect: Allow
+              Action:
+                - apigateway:POST
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys
+            - Effect: Allow
+              Action:
+                - apigateway:DELETE
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*
+            - Effect: Allow
+              Action:
+                - apigateway:PATCH
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt AddApiKeyLogGroup.Arn
+
+  DeleteApiKeyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole      
+      Policies:
+        - PolicyName: DeleteApiKeyPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref DeleteApiKeyStateMachine
+
+  DeleteApiKeyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  DeleteApiKeyStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: state-machines/delete-api-key/delete-api-key.asl.json
+      DefinitionSubstitutions:
+        DynamoDbGetItem: !Sub arn:${AWS::Partition}:states:::dynamodb:getItem
+        TableName: !Ref DynamoTableName
+        ApiId: !Ref ApiId
+        Stage: !Ref ApiStageName
+        ApiGatewayUpdateUsagePlan: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:updateUsagePlan
+        ApiGatewayDeleteUsagePlan: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteUsagePlan
+        ApiGatewayDeleteApiKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteApiKey
+        DynamoDbDeleteItem: !Sub arn:${AWS::Partition}:states:::dynamodb:deleteItem
+        ApiGatewayDeleteUsagePlanKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteUsagePlanKey
+        SqsSendMessage: !Sub arn:${AWS::Partition}:states:::sqs:sendMessage
+        DeadLetterQueueUrl: !Ref DeleteApiKeyDeadLetterQueue
+      Policies: 
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}            
+            - Effect: Allow
+              Action:
+                - apigateway:DELETE
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*
+            - Effect: Allow
+              Action:
+                - apigateway:PATCH
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt DeleteApiKeyDeadLetterQueue.Arn
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt DeleteApiKeyLogGroup.Arn
+
+  DeleteApiKeyDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 604800
+
+  DeleteApiKeyDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if failures occur when deleting an API key
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+      - Name: QueueName
+        Value: !GetAtt DeleteApiKeyDeadLetterQueue.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref DeleteApiKeyDLQAlarmTopic
+      TreatMissingData: notBreaching
+
+  DeleteApiKeyDLQAlarmTopic:
+    Type: AWS::SNS::Topic
+
+  RotateApiKeyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole      
+      Policies:
+        - PolicyName: RotateApiKeyPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartSyncExecution
+                Resource: !Ref RotateApiKeyStateMachine
+
+  RotateApiKeyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  RotateApiKeyStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: EXPRESS
+      DefinitionUri: state-machines/rotate-api-key/rotate-api-key.asl.json
+      DefinitionSubstitutions:
+        DynamoDbGetItem: !Sub arn:${AWS::Partition}:states:::dynamodb:getItem
+        TableName: !Ref DynamoTableName
+        ApiId: !Ref ApiId
+        Stage: !Ref ApiStageName
+        ApiGatewayCreateApiKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:createApiKey
+        ApiGatewayDeleteApiKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteApiKey
+        ApiGatewayCreateUsagePlanKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:createUsagePlanKey
+        DynamoDbUpdateItem: !Sub arn:${AWS::Partition}:states:::dynamodb:updateItem
+        ApiGatewayDeleteUsagePlanKey: !Sub arn:${AWS::Partition}:states:::aws-sdk:apigateway:deleteUsagePlanKey
+        SqsSendMessage: !Sub arn:${AWS::Partition}:states:::sqs:sendMessage
+        DeadLetterQueueUrl: !Ref RotateApiKeyDeadLetterQueue
+      Policies: 
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}            
+            - Effect: Allow
+              Action:
+                - apigateway:POST
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys
+            - Effect: Allow
+              Action:
+                - apigateway:DELETE
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt RotateApiKeyDeadLetterQueue.Arn
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt RotateApiKeyLogGroup.Arn
+
+  RotateApiKeyDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 604800
+
+  RotateApiKeyDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if failures occur when rotating an api key
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+      - Name: QueueName
+        Value: !GetAtt RotateApiKeyDeadLetterQueue.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref RotateApiKeyDLQAlarmTopic
+      TreatMissingData: notBreaching
+
+  RotateApiKeyDLQAlarmTopic:
+    Type: AWS::SNS::Topic
+
+  CustomDomainMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: DeployCustomBasePath
+    Properties:
+      BasePath: !Ref BasePath
+      DomainName: !Ref DomainName
+      RestApiId: !Ref ApiKeyRegistrationApi
+      Stage: !Ref ApiStageName
+
+Outputs:
+  RegistrationBaseUrl:
+    Description: Base url of the service registration Api created in this deployment
+    Value: !If [DeployCustomBasePath, !Sub "https://${DomainName}/${BasePath}", !Join ['', ['https://', !Ref ApiKeyRegistrationApi, '.execute-api.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref ApiStageName]]]
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: 
+          default: Registration Details
+        Parameters:
+          - ApiId
+          - ApiStageName
+          - ApiName
+      - Label:
+          default: Database Settings
+        Parameters:
+          - DynamoTableName
+          - DynamoTableCMKPolicyArn
+      - Label:
+          default: Custom Domain Name (optional)
+        Parameters:
+          - DomainName
+          - BasePath
+    ParameterLabels:
+      ApiId:
+        default: "Api Id *"
+      ApiStageName:
+        default: "Api Stage Name *"
+      ApiName:
+        default: "Service Name *"
+      DynamoTableName:
+        default: "DynamoDB Table Name *"

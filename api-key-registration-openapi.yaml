@@ -1,0 +1,483 @@
+openapi: 3.0.0
+info:
+  title: 
+    Fn::Sub: Api Key Registration (${ApiName})
+  description: API to register consumers of a microservice and create a working API key
+  version: 1.0.0
+
+x-amazon-apigateway-request-validators:
+  Validate body, query string parameters, and headers:
+    validateRequestParameters: true
+    validateRequestBody: true
+x-amazon-apigateway-gateway-responses:
+  BAD_REQUEST_BODY:
+    statusCode: 400
+    responseParameters:
+      gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+    responseTemplates:
+      application/json: '{ "message": "$context.error.validationErrorString" }'
+  UNAUTHORIZED:
+    statusCode: 401
+    responseTemplates:
+      application/json: '{ "message": "Unauthorized" }'
+    responseParameters:
+      gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+  ACCESS_DENIED:
+    statusCode: 401
+    responseTemplates:
+      application/json: '{ "message": "Unauthorized" }'
+    responseParameters:
+      gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      
+paths:
+  /api-keys:
+    post:
+      summary: Registers a new API key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddApiKey'
+      responses:
+        201:
+          $ref: '#/components/responses/Created'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        403:
+          $ref: '#/components/responses/Forbidden'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate body, query string parameters, and headers
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::Sub: ${AddApiKeyRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartSyncExecution
+        httpMethod: POST
+        type: aws
+        requestTemplates:
+          application/json:
+            Fn::Sub:  
+              - |-
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($body = "{""detail"" : $input.json('$')}")
+                {
+                    "input": "$util.escapeJavaScript($body)",
+                    "stateMachineArn": "${StateMachine}"
+                }
+              - { StateMachine: { "Ref": "AddApiKeyStateMachine" }}
+        responses:
+          200:
+            statusCode: 201
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($inputRoot = $input.path('$'))
+                #set($output = $util.parseJson($input.path('$.output')))
+                {
+                  #if("$output.apiKey" != "")
+                    "apiKey": "$output.apiKey"
+                  #end
+                  #if("$inputRoot.error" == "NameExists")
+                    #set($context.responseOverride.status = 400)
+                    "message": "$inputRoot.cause"
+                  #end
+                  #if("$inputRoot.error" == "UnhandledError")
+                    #set($context.responseOverride.status = 500)
+                    "message": "$inputRoot.cause"
+                  #end                  
+                }
+
+    get:
+      summary: Get a list of all registered API keys
+      responses:
+        200:
+          description: The list of registered API keys was successfully returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyList'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        403:
+          $ref: '#/components/responses/Forbidden'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate body, query string parameters, and headers
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::Sub: ${GetApiKeyListRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:dynamodb:action/Query
+        httpMethod: POST
+        type: aws
+        passthroughBehavior: never
+        requestTemplates:
+          application/json:
+            Fn::Sub:
+              - |-
+                {
+                  "TableName": "${TableName}",
+                  "KeyConditionExpression": "#pk = :pk",
+                  "ExpressionAttributeNames": {
+                    "#pk": "pk"
+                  },
+                  "ExpressionAttributeValues": {
+                    ":pk": { "S": "apikey#" }
+                  }                  
+                }
+              - { TableName: { Ref: DynamoTableName } }
+        responses:
+          200:
+            statusCode: 200
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($inputRoot = $input.path('$'))
+                {
+                  "items": [
+                    #foreach($elem in $inputRoot.Items) {                      
+                      "name": "$elem.sk.S",
+                      "created": {
+                        "timestamp": "$elem.audit.M.created.M.timestamp.S"
+                      } 
+                    }#if($foreach.hasNext),#end
+                    #end
+                  ]                  
+                }
+
+  /api-keys/{name}:
+    parameters:
+      - $ref: '#/components/parameters/name'
+    get:
+      summary: Get the details about a specific API key
+      responses:
+        200:
+          description: The API key was found and the details returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyDetail'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        403:
+          $ref: '#/components/responses/Forbidden'
+        404:
+          $ref: '#/components/responses/NotFound'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate body, query string parameters, and headers
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::Sub: ${GetApiKeyDetailsRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:dynamodb:action/GetItem
+        httpMethod: POST
+        type: aws
+        passthroughBehavior: never
+        requestTemplates:
+          application/json:
+            Fn::Sub:
+              - |-
+                {
+                  "TableName": "${TableName}",
+                  "Key": {
+                    "pk": { "S": "apikey#" },
+                    "sk": { "S": "$input.params('name')"}
+                  }             
+                }
+              - { TableName: { Ref: DynamoTableName } }
+        responses:
+          200:
+            statusCode: 200
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($inputRoot = $input.path('$'))
+                {
+                  #if("$inputRoot.Item.sk.S" != "")
+                    "name": "$inputRoot.Item.sk.S",
+                    "created": {
+                      "timestamp": "$inputRoot.Item.audit.M.created.M.timestamp.S"
+                    }                  
+                    #if("$inputRoot.Item.audit.M.lastUpdate.M" != ""),
+                      "lastUpdate": {
+                        "timestamp": "$inputRoot.Item.audit.M.lastUpdate.M.timestamp.S",
+                        "type": "$inputRoot.Item.audit.M.lastUpdate.M.type.S"
+                      }
+                    #end
+                  #else
+                    #set($context.responseOverride.status = 404)
+                    "message": "An api key with the provided name could not be found"
+                  #end
+                }    
+    
+    delete:
+      summary: Remove the API key
+      responses:
+        204:
+          $ref: '#/components/responses/NoContent'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        403:
+          $ref: '#/components/responses/Forbidden'        
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate body, query string parameters, and headers
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::Sub: ${DeleteApiKeyRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartExecution
+        httpMethod: POST
+        type: aws
+        requestTemplates:
+          application/json:
+            Fn::Sub:  
+              - |-
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($body = "{""name"" : ""$input.params('name')""}")
+                {
+                    "input": "$util.escapeJavaScript($body)",
+                    "stateMachineArn": "${StateMachine}"
+                }
+              - { StateMachine: { "Ref": "DeleteApiKeyStateMachine" }}
+        responses:
+          200:
+            statusCode: 204
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')                
+
+  /api-keys/{name}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/name'
+    post:
+      summary: Rotate the API key value
+      description: Inactive the current API key and generate a new one effective immediately
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateApiKey'
+      responses:
+        200:
+          description: The API key was successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        403:
+          $ref: '#/components/responses/Forbidden'
+        404:
+          $ref: '#/components/responses/NotFound'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+      x-amazon-apigateway-request-validator: Validate body, query string parameters, and headers
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::Sub: ${RotateApiKeyRole.Arn}
+        uri:
+          Fn::Sub: arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartSyncExecution
+        httpMethod: POST
+        type: aws
+        requestTemplates:
+          application/json:
+            Fn::Sub:  
+              - |-
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($body = "{""detail"" : $input.json('$'), ""name"": ""$input.params('name')""}")
+                {
+                    "input": "$util.escapeJavaScript($body)",
+                    "stateMachineArn": "${StateMachine}"
+                }
+              - { StateMachine: { "Ref": "RotateApiKeyStateMachine" }}
+        responses:
+          200:
+            statusCode: 200
+            responseTemplates:
+              application/json: |
+                #set($context.responseOverride.header.Access-Control-Allow-Origin = '*')
+                #set($inputRoot = $input.path('$'))
+                #set($output = $util.parseJson($input.path('$.output')))
+                {
+                  #if("$output.apiKey" != "")
+                    "apiKey": "$output.apiKey"
+                  #end
+                  #if("$inputRoot.error" == "NotFound")
+                    #set($context.responseOverride.status = 404)
+                    "message": "$inputRoot.cause"
+                  #end
+                  #if("$inputRoot.error" == "UnhandledError")
+                    #set($context.responseOverride.status = 500)
+                    "message": "$inputRoot.cause"
+                  #end                  
+                }
+
+components:
+  schemas: 
+    AddApiKey:
+      type: object
+      required:
+        - name
+      properties:        
+        name:
+          type: string
+          minLength: 2
+          pattern: ^[a-z]*$
+          description: Unique identifier for the API key. Must be all lowercase alpha characters
+          example: gopherholes
+
+    ApiKeyList:
+      type: object
+      required: 
+        - items
+      properties:
+        items:
+          type: array
+          description: List of registered api keys
+          items:
+            $ref: '#/components/schemas/ApiKeySummary'
+
+    ApiKeySummary:
+      type: object
+      required:
+        - name
+        - created
+      properties:
+        name:
+          type: string
+          description: Unique identifier for the API key
+          example: gopherholes
+        created:
+          type: object
+          required:
+            - timestamp
+          properties:            
+            timestamp:
+              type: string
+              format: date-time
+              description: Date and time (UTC) the api key was registered
+              example: '2022-03-10T14:22:56.000Z'
+    
+    ApiKeyDetail:
+      allOf:
+        - $ref: '#/components/schemas/ApiKeySummary'
+        - type: object
+          required:
+            - lastUpdate
+          properties:
+            lastUpdate:
+              type: object
+              required:
+                - type
+                - email
+                - timestamp
+              properties:
+                type:
+                  type: string
+                  description: The type of change that was made
+                  example: key-rotation                
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: Date and time of the last update
+                  example: '2022-04-10T12:41:00.445Z'
+
+    ApiKey:
+      type: object
+      required:
+        - apiKey
+      properties:
+        apiKey:
+          type: string
+          description: Api key used to authenticate with the microservice
+    
+    RotateApiKey:
+      type: object
+      properties:
+        value:
+          type: string
+          minLength: 20
+          description: Provided value to manually set the Api key to
+          example: mytestapikey
+
+    Error:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Details of the error that occurred
+          example: The request type provided in the message is invalid.
+
+  parameters:
+    name:
+      name: name
+      in: path
+      description: Unique identifier for an API key
+      required: true      
+      schema:
+        type: string
+        example: gopherholes
+
+  responses:
+    Created:
+      description: The request succeeded and created a new resource. (Status Code 201)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+            required:
+              - id
+    NoContent:
+      description: No content is returned by the API. (Status Code 204)
+    BadRequest:
+      description: Invalid content was provided in the request. (Status Code 400)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized: 
+      description: The request requires authentication. (Status Code 401)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden: 
+      description: Access is not authorized. (Status Code 403)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: The resource with the request id was not found. (Status Code 404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalServerError:
+      description: Something went wrong during processing of the request. (Status Code 500)
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - message
+            properties:
+              message:
+                type: string
+                description: Error message details
+                example: Something went wrong

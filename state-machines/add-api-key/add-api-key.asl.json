@@ -1,0 +1,388 @@
+{
+  "Comment": "Adds an API Key to a given API",
+  "StartAt": "Get Api Key",
+  "States": {
+    "Get Api Key": {
+      "Type": "Task",
+      "Resource": "${DynamoDbGetItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S": "apikey#"
+          },
+          "sk": {
+            "S.$": "$.detail.name"
+          }
+        }
+      },
+      "ResultPath": "$.existingApiKey",
+      "Next": "Does Api Key Already Exist?"
+    },
+    "Does Api Key Already Exist?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.existingApiKey.Item",
+          "IsPresent": true,
+          "Next": "Api Key Already Exists"
+        }
+      ],
+      "Default": "Create API Usage Plan and Key"
+    },
+    "Create API Usage Plan and Key": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Create Usage Plan",
+          "States": {
+            "Create Usage Plan": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "Name.$": "$.detail.name",
+                "ApiStages": [
+                  {
+                    "ApiId": "${ApiId}",
+                    "Stage": "${Stage}"
+                  }
+                ]
+              },
+              "Resource": "${ApiGatewayCreateUsagePlan}",
+              "ResultPath": "$.usagePlan",
+              "ResultSelector": {
+                "id.$": "$.Id"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Usage Plan Creation Failed",
+                  "ResultPath": "$.createUsagePlan.error"
+                }
+              ]
+            },
+            "Usage Plan Creation Failed": {
+              "Type": "Pass",
+              "End": true,
+              "Parameters": {
+                "error.$": "$.createUsagePlan.error"
+              }
+            }
+          }
+        },
+        {
+          "StartAt": "Create Api Key",
+          "States": {
+            "Create Api Key": {
+              "Type": "Task",
+              "Parameters": {
+                "Enabled": true,
+                "Name.$": "States.Format('{}-${ApiId}', $.detail.name)"
+              },
+              "Resource": "${ApiGatewayCreateApiKey}",
+              "ResultPath": "$.apiKey",
+              "ResultSelector": {
+                "id.$": "$.Id",
+                "value.$": "$.Value"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Api Key Creation Failed",
+                  "ResultPath": "$.createApiKey.error"
+                }
+              ],
+              "End": true
+            },
+            "Api Key Creation Failed": {
+              "Type": "Pass",
+              "End": true,
+              "Parameters": {
+                "error.$": "$.createApiKey.error"
+              }
+            }
+          }
+        }
+      ],
+      "Next": "Did Error Occur?",
+      "ResultPath": "$.parallelResults"
+    },
+    "Did Error Occur?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.parallelResults[0].error",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.parallelResults[1].error",
+              "IsPresent": true
+            }
+          ],
+          "Next": "Was Usage Plan Created?"
+        }
+      ],
+      "Default": "Format State"
+    },
+    "Was Usage Plan Created?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.parallelResults[0].error",
+            "IsPresent": true
+          },
+          "Next": "Add Usage Plan Id To Cleanup Object"
+        }
+      ],
+      "Default": "Was Api Key Created?"
+    },
+    "Add Usage Plan Id To Cleanup Object": {
+      "Type": "Pass",
+      "ResultPath": "$.cleanup",
+      "Parameters": {
+        "usagePlanId.$": "$.parallelResults[0].usagePlan.id"
+      },
+      "Next": "Was Api Key Created?"
+    },
+    "Was Api Key Created?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.parallelResults[1].error",
+            "IsPresent": true
+          },
+          "Next": "Add Api Key Id to Cleanup Object"
+        }
+      ],
+      "Default": "Remove Created Entities"
+    },
+    "Add Api Key Id to Cleanup Object": {
+      "Type": "Pass",
+      "Parameters": {
+        "apiKeyId.$": "$.parallelResults[1].apiKey.id"
+      },
+      "ResultPath": "$.cleanup",
+      "Next": "Remove Created Entities"
+    },
+    "Remove Created Entities": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Remove Usage Plan?",
+          "States": {
+            "Remove Usage Plan?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.cleanup.usagePlanId",
+                  "IsPresent": true,
+                  "Next": "Remove Stage From Usage Plan"
+                }
+              ],
+              "Default": "Skip Usage Plan Delete"
+            },
+            "Remove Stage From Usage Plan": {
+              "Type": "Task",
+              "Next": "Delete Usage Plan",
+              "Parameters": {
+                "UsagePlanId.$": "$.cleanup.usagePlanId",
+                "PatchOperations": [
+                  {
+                    "Op": "remove",
+                    "Path": "/apiStages",
+                    "Value": "${ApiId}:${Stage}"
+                  }
+                ]
+              },
+              "Resource": "${ApiGatewayUpdateUsagePlan}",
+              "ResultPath": null
+            },
+            "Skip Usage Plan Delete": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Delete Usage Plan": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "UsagePlanId.$": "$.cleanup.usagePlanId"
+              },
+              "Resource": "${ApiGatewayDeleteUsagePlan}",
+              "ResultPath": null
+            }
+          }
+        },
+        {
+          "StartAt": "Remove Api Key?",
+          "States": {
+            "Remove Api Key?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.cleanup.apiKeyId",
+                  "IsPresent": true,
+                  "Next": "Delete Api Key"
+                }
+              ],
+              "Default": "Skip Delete Api Key"
+            },
+            "Skip Delete Api Key": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Delete Api Key": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "ApiKey.$": "$.cleanup.apiKeyId"
+              },
+              "Resource": "${ApiGatewayDeleteApiKey}",
+              "ResultPath": null
+            }
+          }
+        }
+      ],
+      "Next": "Unhandled Exception"
+    },
+    "Unhandled Exception": {
+      "Type": "Fail",
+      "Cause": "Something went wrong",
+      "Error": "UnhandledError"
+    },
+    "Format State": {
+      "Type": "Pass",
+      "Next": "Link Api Key to Usage Plan",
+      "Parameters": {
+        "usagePlanId.$": "$.parallelResults[0].usagePlan.id",
+        "apiKey.$": "$.parallelResults[1].apiKey",
+        "name.$": "$.detail.name"
+      }
+    },
+    "Link Api Key to Usage Plan": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.apiKey.id",
+        "KeyType": "API_KEY",
+        "UsagePlanId.$": "$.usagePlanId"
+      },
+      "Resource": "${ApiGatewayCreateUsagePlanKey}",
+      "ResultSelector": {
+        "id.$": "$.Id"
+      },
+      "ResultPath": "$.usagePlanKey",
+      "Next": "Save Api Key",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Setup Removal Object",
+          "ResultPath": "$.linkUsagePlan.error"
+        }
+      ]
+    },
+    "Setup Removal Object": {
+      "Type": "Pass",
+      "Next": "Remove Created Entities",
+      "Parameters": {
+        "cleanup": {
+          "apiKeyId.$": "$.apiKey.id",
+          "usagePlanId.$": "$.usagePlanId"
+        }
+      }
+    },
+    "Save Api Key": {
+      "Type": "Task",
+      "Resource": "${DynamoDbPutItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Item": {
+          "pk": {
+            "S": "apikey#"
+          },
+          "sk": {
+            "S.$": "$.name"
+          },
+          "keyParts": {
+            "M": {
+              "name": {
+                "S.$": "$.name"
+              }
+            }
+          },
+          "data": {
+            "M": {              
+              "apiKeyId": {
+                "S.$": "$.apiKey.id"
+              },
+              "usagePlanId": {
+                "S.$": "$.usagePlanId"
+              },
+              "usagePlanKeyId": {
+                "S.$": "$.usagePlanKey.id"
+              }
+            }
+          },
+          "facet": {
+            "S": "api-key"
+          },
+          "audit": {
+            "M": {
+              "created": {
+                "M": {                  
+                  "timestamp": {
+                    "S.$": "$$.State.EnteredTime"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "Set Return value",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Delete Api Key To Usage Plan Link",
+          "ResultPath": "$.saveApiKey.error"
+        }
+      ]
+    },
+    "Delete Api Key To Usage Plan Link": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.usagePlanKey.id",
+        "UsagePlanId.$": "$.usagePlanId"
+      },
+      "Resource": "${ApiGatewayDeleteUsagePlanKey}",
+      "Next": "Setup Removal Object",
+      "ResultPath": null
+    },
+    "Set Return value": {
+      "Type": "Pass",
+      "Next": "Success",
+      "Parameters": {
+        "apiKey.$": "$.apiKey.value"
+      }
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Api Key Already Exists": {
+      "Type": "Fail",
+      "Error": "NameExists",
+      "Cause": "An API key with the provided name is already registered"
+    }
+  }
+}

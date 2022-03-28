@@ -1,0 +1,238 @@
+{
+  "Comment": "Deletes a registered API key",
+  "StartAt": "Get API Key",
+  "States": {
+    "Get API Key": {
+      "Type": "Task",
+      "Resource": "${DynamoDbGetItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S": "apikey#"
+          },
+          "sk": {
+            "S.$": "$.name"
+          }
+        }
+      },
+      "ResultPath": "$.apiKey",
+      "Next": "Does API Key Already Exist?",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue",
+          "ResultPath": "$.getApiKey.error"
+        }
+      ]
+    },
+    "Does API Key Already Exist?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.apiKey.Item",
+            "IsPresent": true
+          },
+          "Next": "API Key Not Present"
+        }
+      ],
+      "Default": "Delete API Key To Usage Plan Link"
+    },
+    "API Key Not Present": {
+      "Type": "Succeed"
+    },
+    "Remove Created Entities": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Remove Stage From Usage Plan",
+          "States": {
+            "Remove Stage From Usage Plan": {
+              "Type": "Task",
+              "Next": "Delete Usage Plan",
+              "Parameters": {
+                "UsagePlanId.$": "$.apiKey.Item.data.M.usagePlanId.S",
+                "PatchOperations": [
+                  {
+                    "Op": "remove",
+                    "Path": "/apiStages",
+                    "Value": "${ApiId}:${Stage}"
+                  }
+                ]
+              },
+              "Resource": "${ApiGatewayUpdateUsagePlan}",
+              "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Usage Plan Delete Failed",
+                  "ResultPath": "$.deleteUsagePlan.error"
+                }
+              ]
+            },
+            "Usage Plan Delete Failed": {
+              "Type": "Pass",
+              "End": true,
+              "Parameters": {
+                "error.$": "$.deleteUsagePlan.error"
+              }
+            },
+            "Delete Usage Plan": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "UsagePlanId.$": "$.apiKey.Item.data.M.usagePlanId.S"
+              },
+              "Resource": "${ApiGatewayDeleteUsagePlan}",
+              "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Usage Plan Delete Failed",
+                  "ResultPath": "$.deleteUsagePlan.error"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "StartAt": "Delete API Key",
+          "States": {
+            "Delete API Key": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "ApiKey.$": "$.apiKey.Item.data.M.apiKeyId.S"
+              },
+              "Resource": "${ApiGatewayDeleteApiKey}",
+              "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Delete Api Key Failed",
+                  "ResultPath": "$.deleteApiKey.error"
+                }
+              ]
+            },
+            "Delete Api Key Failed": {
+              "Type": "Pass",
+              "End": true,
+              "Parameters": {
+                "error.$": "$.deleteApiKey.error"
+              }
+            }
+          }
+        },
+        {
+          "StartAt": "Delete Registered API Key",
+          "States": {
+            "Delete Registered API Key": {
+              "Type": "Task",
+              "Resource": "${DynamoDbDeleteItem}",
+              "Parameters": {
+                "TableName": "${TableName}",
+                "Key": {
+                  "pk": {
+                    "S.$": "$.apiKey.Item.pk.S"
+                  },
+                  "sk": {
+                    "S.$": "$.apiKey.Item.sk.S"
+                  }
+                }
+              },
+              "End": true,
+              "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Delete API Key Failed",
+                  "ResultPath": "$.deleteRegisteredApiKey.error"
+                }
+              ]
+            },
+            "Delete API Key Failed": {
+              "Type": "Pass",
+              "End": true,
+              "Parameters": {
+                "error.$": "$.deleteRegisteredApiKey.error"
+              }
+            }
+          }
+        }
+      ],
+      "Next": "Did Anything Fail to Delete?",
+      "ResultPath": "$.parallelResults"
+    },
+    "Did Anything Fail to Delete?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.parallelResults[0].error",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.parallelResults[1].error",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.parallelResults[2].error",
+              "IsPresent": true
+            }
+          ],
+          "Next": "Send to Dead Letter Queue"
+        }
+      ],
+      "Default": "Success"
+    },
+    "Send to Dead Letter Queue": {
+      "Type": "Task",
+      "Resource": "${SqsSendMessage}",
+      "Parameters": {
+        "MessageBody.$": "$",
+        "QueueUrl": "${DeadLetterQueueUrl}"
+      },
+      "Next": "Unhandled Exception",
+      "ResultPath": null
+    },
+    "Unhandled Exception": {
+      "Type": "Fail",
+      "Cause": "Something went wrong",
+      "Error": "UnhandledError"
+    },
+    "Delete API Key To Usage Plan Link": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.apiKey.Item.data.M.usagePlanKeyId.S",
+        "UsagePlanId.$": "$.apiKey.Item.data.M.usagePlanId.S"
+      },
+      "Resource": "${ApiGatewayDeleteUsagePlanKey}",
+      "Next": "Remove Created Entities",
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue",
+          "ResultPath": "$.deleteUsagePlanKey.error"
+        }
+      ]
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}

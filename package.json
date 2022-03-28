@@ -1,0 +1,9 @@
+{
+  "name": "serverless-api-key-registration",
+  "version": "1.0.0",
+  "description": "Deployable template repo for microservice API Key registration",
+  "author": "allenheltondev",
+  "private": true,
+  "license": "MIT",
+  "repository": "https://github.com/allenheltondev/serverless-api-key-registration"
+}

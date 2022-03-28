@@ -1,0 +1,280 @@
+{
+  "Comment": "Replaces an existing API key with another",
+  "StartAt": "Get Registered API Key",
+  "States": {
+    "Get Registered API Key": {
+      "Type": "Task",
+      "Resource": "${DynamoDbGetItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S": "apikey#"
+          },
+          "sk": {
+            "S.$": "$.name"
+          }
+        }
+      },
+      "ResultPath": "$.registeredApiKey",
+      "Next": "Does Registered API Key Exist?"
+    },
+    "Does Registered API Key Exist?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.registeredApiKey.Item",
+            "IsPresent": true
+          },
+          "Next": "Registered API Key Not Found"
+        }
+      ],
+      "Default": "Was Custom API Key Value Provided?"
+    },
+    "Send to Dead Letter Queue (Existing Keys)": {
+      "Type": "Task",
+      "Resource": "${SqsSendMessage}",
+      "Parameters": {
+        "MessageBody.$": "$",
+        "QueueUrl": "${DeadLetterQueueUrl}"
+      },
+      "Next": "Success"
+    },
+    "Send to Dead Letter Queue (New Keys)": {
+      "Type": "Task",
+      "Resource": "${SqsSendMessage}",
+      "Parameters": {
+        "MessageBody.$": "$",
+        "QueueUrl": "${DeadLetterQueueUrl}"
+      },
+      "Next": "Unhandled Exception"
+    },
+    "Was Custom API Key Value Provided?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail.value",
+          "IsPresent": true,
+          "Next": "Create Custom API Key"
+        }
+      ],
+      "Default": "Create Generated API Key"
+    },
+    "Create Generated API Key": {
+      "Type": "Task",
+      "Next": "Link API Key to Usage Plan",
+      "Parameters": {
+        "Enabled": true,
+        "Name.$": "States.Format('{}-${ApiId}', $.name)"
+      },
+      "Resource": "${ApiGatewayCreateApiKey}",
+      "ResultSelector": {
+        "id.$": "$.Id",
+        "value.$": "$.Value"
+      },
+      "ResultPath": "$.apiKey",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Unhandled Exception",
+          "ResultPath": "$.createApiKey.error"
+        }
+      ]
+    },
+    "Create Custom API Key": {
+      "Type": "Task",
+      "Next": "Link API Key to Usage Plan",
+      "Parameters": {
+        "Enabled": true,
+        "Name.$": "States.Format('{}-${ApiId}', $.name)",
+        "Value.$": "$.detail.value"
+      },
+      "Resource": "${ApiGatewayCreateApiKey}",
+      "ResultSelector": {
+        "id.$": "$.Id",
+        "value.$": "$.Value"
+      },
+      "ResultPath": "$.apiKey",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.createApiKey.error",
+          "Next": "Unhandled Exception"
+        }
+      ]
+    },
+    "Unhandled Exception": {
+      "Type": "Fail",
+      "Cause": "Something went wrong",
+      "Error": "UnhandledError"
+    },
+    "Link API Key to Usage Plan": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.apiKey.id",
+        "KeyType": "API_KEY",
+        "UsagePlanId.$": "$.registeredApiKey.Item.data.M.usagePlanId.S"
+      },
+      "Resource": "${ApiGatewayCreateUsagePlanKey}",
+      "ResultSelector": {
+        "id.$": "$.Id"
+      },
+      "ResultPath": "$.usagePlanKey",
+      "Next": "Update Registered API Key With New Ids",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Delete New API Key",
+          "ResultPath": "$.linkUsagePlan.error"
+        }
+      ]
+    },
+    "Delete New API Key": {
+      "Type": "Task",
+      "Parameters": {
+        "ApiKey.$": "$.apiKey.id"
+      },
+      "Resource": "${ApiGatewayDeleteApiKey}",
+      "ResultPath": null,
+      "Next": "Unhandled Exception",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue (New Keys)",
+          "ResultPath": "$.deleteNewApiKey.error"
+        }
+      ]
+    },
+    "Update Registered API Key With New Ids": {
+      "Type": "Task",
+      "Resource": "${DynamoDbUpdateItem}",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": {
+            "S.$": "$.registeredApiKey.Item.pk.S"
+          },
+          "sk": {
+            "S.$": "$.registeredApiKey.Item.sk.S"
+          }
+        },
+        "UpdateExpression": "SET #data.#apiKeyId = :apiKeyId, #data.#usagePlanKeyId = :usagePlanKeyId, #audit.#lastUpdate = :lastUpdate",
+        "ExpressionAttributeNames": {
+          "#data": "data",
+          "#apiKeyId": "apiKeyId",
+          "#usagePlanKeyId": "usagePlanKeyId",
+          "#audit": "audit",
+          "#lastUpdate": "lastUpdate"
+        },
+        "ExpressionAttributeValues": {
+          ":apiKeyId": {
+            "S.$": "$.apiKey.id"
+          },
+          ":usagePlanKeyId": {
+            "S.$": "$.usagePlanKey.id"
+          },
+          ":lastUpdate": {
+            "M": {              
+              "timestamp": {
+                "S.$": "$$.State.EnteredTime"
+              },
+              "type": {
+                "S": "key-rotation"
+              }
+            }
+          }
+        }
+      },
+      "Next": "Unlink Current API Key",
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Unlink New API Key"
+        }
+      ]
+    },
+    "Unlink New API Key": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.apiKey.id",
+        "UsagePlanId.$": "$.registeredApiKey.Item.data.M.usagePlanId.S"
+      },
+      "Resource": "${ApiGatewayDeleteUsagePlanKey}",
+      "ResultPath": null,
+      "Next": "Delete New API Key",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue (New Keys)",
+          "ResultPath": "$.unlinkNewApiKey.error"
+        }
+      ]
+    },
+    "Unlink Current API Key": {
+      "Type": "Task",
+      "Parameters": {
+        "KeyId.$": "$.registeredApiKey.Item.data.M.usagePlanKeyId.S",
+        "UsagePlanId.$": "$.registeredApiKey.Item.data.M.usagePlanId.S"
+      },
+      "Resource": "${ApiGatewayDeleteUsagePlanKey}",
+      "Next": "Delete Current API Key",
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue (Existing Keys)",
+          "ResultPath": "$.unlinkCurrentApiKey.error"
+        }
+      ]
+    },
+    "Delete Current API Key": {
+      "Type": "Task",
+      "Parameters": {
+        "ApiKey.$": "$.registeredApiKey.Item.data.M.apiKeyId.S"
+      },
+      "Resource": "${ApiGatewayDeleteApiKey}",
+      "ResultPath": null,
+      "Next": "Set Return value",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Send to Dead Letter Queue (Existing Keys)",
+          "ResultPath": "$.deleteCurrentApiKey.error"
+        }
+      ]
+    },
+    "Set Return value": {
+      "Type": "Pass",
+      "Next": "Success",
+      "Parameters": {
+        "apiKey.$": "$.apiKey.value"
+      }
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Registered API Key Not Found": {
+      "Type": "Fail",
+      "Error": "NotFound",
+      "Cause": "An API key with the provided product key could not be found"
+    }
+  }
+}
