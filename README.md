@@ -2,6 +2,14 @@
 
 This repository is intended to be used as a template for adding API key registration to a microservice. It can be deployed into the same AWS account multiple times to enable consumers to register for multiple microservices that live in the same account.
 
+## Benchmarking
+
+There are three endpoints in this API that functionally perform the same operation, but are built with different mechanisms for performance comparisons.
+
+* `/api-keys` - Uses an express workflow in Step Functions
+* `/v2/api-keys` - Uses a Lambda function with v2 of the AWS SDK
+* `/v3/api-keys` - Uses a Lambda function with v3 of the AWS SDK
+
 ## Why Is This Necessary?
 
 All APIs, even proof of concepts, need to be secured. This template provides an easy way to implement security on everything in a repeatable manner. 

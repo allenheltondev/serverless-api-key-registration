@@ -46,6 +46,16 @@ Conditions:
           - !Equals [!Ref BasePath, '']
 
 Globals:  
+  Function:
+    Runtime: nodejs14.x
+    Architectures:
+      - arm64
+    Tracing: Active
+    Timeout: 15
+    Handler: index.handler
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
   Api:
     Cors:
       AllowMethods: "'DELETE,GET,OPTIONS,POST,PUT'"
@@ -437,6 +447,120 @@ Resources:
       DomainName: !Ref DomainName
       RestApiId: !Ref ApiKeyRegistrationApi
       Stage: !Ref ApiStageName
+
+  AddApiKeyLambdaV2:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/add-key-v2
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}
+            - Effect: Allow
+              Action:
+                - apigateway:POST
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys
+            - Effect: Allow
+              Action:
+                - apigateway:DELETE
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*
+            - Effect: Allow
+              Action:
+                - apigateway:PATCH
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoTableName
+          API_ID: !Ref ApiId
+          STAGE: !Ref ApiStageName
+      Events:
+        AddApiKeyV2Event:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiKeyRegistrationApi
+            Path: /v2/api-keys
+            Method: POST
+
+  AddApiKeyLambdaV3:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/add-key-v3
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - !If [ HasDynamoCMK, !Ref DynamoTableCMKPolicyArn, !Ref AWS::NoValue ]
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}
+            - Effect: Allow
+              Action:
+                - apigateway:POST
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys
+            - Effect: Allow
+              Action:
+                - apigateway:DELETE
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*
+            - Effect: Allow
+              Action:
+                - apigateway:PATCH
+              Resource: 
+                - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoTableName
+          API_ID: !Ref ApiId
+          STAGE: !Ref ApiStageName
+      Events:
+        AddApiKeyV2Event:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiKeyRegistrationApi
+            Path: /v3/api-keys
+            Method: POST
 
 Outputs:
   RegistrationBaseUrl:

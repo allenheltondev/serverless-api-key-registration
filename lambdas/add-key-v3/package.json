@@ -1,15 +1,15 @@
 {
-  "name": "serverless-api-key-registration",
+  "name": "add-key-v3",
   "version": "1.0.0",
-  "description": "Deployable template repo for microservice API Key registration",
+  "description": "Lambda function to create a new api key with the aws sdk v3",
   "author": "allenheltondev",
   "private": true,
   "license": "MIT",
   "repository": "https://github.com/allenheltondev/serverless-api-key-registration",
   "dependencies": {
+    "@aws-sdk/client-api-gateway": "^3.58.0",
+    "@aws-sdk/client-dynamodb": "^3.58.0",
+    "@aws-sdk/util-dynamodb": "^3.58.0",
     "http-status-codes": "^2.2.0"
-  },
-  "devDependencies": {
-    "aws-sdk": "^2.1105.0"
   }
 }
